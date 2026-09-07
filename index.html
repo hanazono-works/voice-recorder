@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>リアルタイム文字起こし</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#111827;--muted:#6b7280;--line:#e5e7eb;--red:#d92d20;--dark:#111827;--green:#067647}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;background:var(--bg);color:var(--text)}
+main{max-width:920px;margin:auto;padding:18px}h1{font-size:clamp(24px,4vw,34px);margin:0}.sub{color:var(--muted);font-size:14px;margin:5px 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:18px;margin-bottom:14px}.row{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.live{display:flex;align-items:center;gap:9px;font-weight:800}.dot{width:12px;height:12px;border-radius:50%;background:#9ca3af}.dot.on{background:var(--red);box-shadow:0 0 0 5px rgba(217,45,32,.12)}
+.timer{font-size:30px;font-weight:900;font-variant-numeric:tabular-nums}.controls,.actions{display:grid;gap:10px;margin-top:15px}.controls{grid-template-columns:1fr 1fr}.actions{grid-template-columns:repeat(3,1fr)}
+button{border:0;border-radius:14px;min-height:52px;padding:12px 16px;font-size:16px;font-weight:800;cursor:pointer}.start{background:var(--red);color:#fff}.stop{background:var(--dark);color:#fff}.soft{background:#f3f4f6;color:#111827;border:1px solid var(--line)}
+button:disabled{opacity:.45;cursor:not-allowed}textarea{width:100%;min-height:330px;border:1px solid var(--line);border-radius:14px;padding:15px;font:inherit;font-size:17px;line-height:1.8;resize:vertical}
+.interim,.error{margin-top:10px;padding:11px 13px;border-radius:12px;min-height:45px}.interim{background:#f9fafb;border:1px dashed var(--line);color:var(--muted)}.error{display:none;background:#fef3f2;border:1px solid #fecdca;color:#b42318}.error.on{display:block}
+.note{font-size:13px;line-height:1.6;color:var(--muted)}audio{width:100%;margin-top:10px}
+@media(max-width:640px){main{padding:11px}.card{padding:14px;border-radius:16px}.controls,.actions{grid-template-columns:1fr}textarea{min-height:300px}}
+</style>
+</head>
+<body>
+<main>
+<h1>録音・リアルタイム文字起こし</h1>
+<div class="sub">Safari推奨 / iPhone・iPad対応想定</div>
+
+<section class="card">
+ <div class="row"><div class="live"><span id="dot" class="dot"></span><span id="status">待機中</span></div><div id="timer" class="timer">00:00:00</div></div>
+ <div class="controls"><button id="start" class="start">● 録音開始</button><button id="stop" class="stop" disabled>■ 録音終了</button></div>
+ <div id="error" class="error"></div>
+ <p class="note">初回のみマイク利用の許可が表示されます。HTTPSで公開してください。</p>
+</section>
+
+<section class="card">
+ <strong>リアルタイム文字起こし</strong>
+ <textarea id="text" placeholder="録音を開始すると、認識された文章がここへ追加されます。"></textarea>
+ <div id="interim" class="interim">待機中です。</div>
+ <div class="actions"><button id="copy" class="soft">📋 コピー</button><button id="clear" class="soft">🗑 クリア</button><button id="saveText" class="soft">💾 TXT保存</button></div>
+</section>
+
+<section class="card">
+ <strong>録音データ</strong>
+ <audio id="player" controls></audio>
+ <div class="actions"><button id="saveAudio" class="soft" disabled>🎵 音声保存</button></div>
+</section>
+</main>
+
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let recognition=null, recorder=null, stream=null, chunks=[], finalText="", sec=0, timer=null, running=false, audioUrl="";
+
+function showError(msg){$("error").textContent=msg;$("error").classList.add("on")}
+function clearError(){$("error").classList.remove("on");$("error").textContent=""}
+function fmt(n){return [Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(v=>String(v).padStart(2,"0")).join(":")}
+
+async function startAll(){
+ clearError();
+ if(!navigator.mediaDevices?.getUserMedia){showError("このブラウザではマイク録音を利用できません。SafariでHTTPSのURLを開いてください。");return}
+ if(!SR){showError("このブラウザではリアルタイム音声認識を利用できません。iPhone/iPadではSafariでお試しください。");return}
+ try{
+   stream=await navigator.mediaDevices.getUserMedia({audio:true});
+   chunks=[];
+   let opts={};
+   const types=["audio/mp4","audio/webm;codecs=opus","audio/webm"];
+   const chosen=types.find(t=>window.MediaRecorder?.isTypeSupported?.(t));
+   if(chosen)opts.mimeType=chosen;
+   recorder=new MediaRecorder(stream,opts);
+   recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
+   recorder.onstop=()=>{
+     const type=recorder.mimeType||"audio/mp4";
+     const blob=new Blob(chunks,{type});
+     if(audioUrl)URL.revokeObjectURL(audioUrl);
+     audioUrl=URL.createObjectURL(blob); $("player").src=audioUrl; $("saveAudio").disabled=false;
+     $("saveAudio").dataset.type=type;
+   };
+   recorder.start(1000);
+
+   finalText=$("text").value.trim();
+   recognition=new SR();
+   recognition.lang="ja-JP";
+   recognition.continuous=true;
+   recognition.interimResults=true;
+   recognition.onresult=e=>{
+     let interim="";
+     for(let i=e.resultIndex;i<e.results.length;i++){
+       const t=e.results[i][0].transcript;
+       if(e.results[i].isFinal){finalText+=(finalText?"\n":"")+t;$("text").value=finalText;$("text").scrollTop=$("text").scrollHeight}
+       else interim+=t;
+     }
+     $("interim").textContent=interim||"音声を認識しています…";
+   };
+   recognition.onerror=e=>{ if(e.error!=="aborted") $("interim").textContent="音声認識: "+e.error; };
+   recognition.onend=()=>{ if(running){try{recognition.start()}catch(_){}} };
+   running=true;
+   recognition.start();
+
+   sec=0;$("timer").textContent="00:00:00";timer=setInterval(()=>{$("timer").textContent=fmt(++sec)},1000);
+   $("dot").classList.add("on");$("status").textContent="録音中";$("start").disabled=true;$("stop").disabled=false;$("interim").textContent="音声を認識しています…";
+ }catch(e){showError("マイクを開始できませんでした。Safariのマイク許可を確認してください。")}
+}
+
+function stopAll(){
+ running=false;
+ clearInterval(timer);
+ try{recognition?.stop()}catch(_){}
+ try{if(recorder&&recorder.state!=="inactive")recorder.stop()}catch(_){}
+ stream?.getTracks().forEach(t=>t.stop());
+ $("dot").classList.remove("on");$("status").textContent="録音終了";$("start").disabled=false;$("stop").disabled=true;$("interim").textContent="文字起こしを終了しました。";
+}
+
+$("start").addEventListener("click",startAll);
+$("stop").addEventListener("click",stopAll);
+$("clear").addEventListener("click",()=>{$("text").value="";finalText="";$("interim").textContent="クリアしました。"});
+$("copy").addEventListener("click",async()=>{try{await navigator.clipboard.writeText($("text").value);$("interim").textContent="コピーしました。"}catch(e){$("text").select();document.execCommand("copy")}});
+$("saveText").addEventListener("click",()=>{const b=new Blob([$("text").value],{type:"text/plain;charset=utf-8"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="文字起こし.txt";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)});
+$("saveAudio").addEventListener("click",()=>{if(!audioUrl)return;const a=document.createElement("a");a.href=audioUrl;const type=$("saveAudio").dataset.type||"";a.download=type.includes("webm")?"録音.webm":"録音.m4a";a.click()});
+})();
+</script>
+</body>
+</html>
